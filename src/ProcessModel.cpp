@@ -1,4 +1,6 @@
 #include "d3dtypes.h"
+#include <unordered_map>
+#include <vector>
 #include "LoadWorld.hpp"
 #include "world.hpp"
 #include "GlobalSettings.hpp"
@@ -25,6 +27,30 @@ int sharedv[1000];
 int track[60000];
 
 void SmoothNormals(int start_cnt);
+
+// Define a struct for vertex coordinates (used as key in unordered_map)
+struct VertexKey {
+    float x, y, z;
+
+    bool operator==(const VertexKey& other) const {
+        return x == other.x && y == other.y && z == other.z;
+    }
+};
+
+// Hash function for VertexKey
+namespace std {
+    template <>
+    struct hash<VertexKey> {
+        size_t operator()(const VertexKey& key) const {
+            // A simple hash function, can be improved if needed
+            size_t h1 = hash<float>()(key.x);
+            size_t h2 = hash<float>()(key.y);
+            size_t h3 = hash<float>()(key.z);
+            return h1 ^ (h2 << 1) ^ (h3 << 2);
+        }
+    };
+}
+
 extern SWITCHMOD* switchmodify;
 int countswitches = 0;
 
@@ -842,58 +868,45 @@ int tracknormal[MAX_NUM_QUADS];
 
 void SmoothNormals(int start_cnt) {
     // Smooth the vertex normals out so the models look less blocky.
-    XMVECTOR sum, sumtan, average;
-    XMFLOAT3 x1, xtan, final2, finaltan;
+    XMVECTOR sum_normals, sum_tangents, average_normal, average_tangent;
+    XMFLOAT3 normal_temp, tangent_temp, final_normal, final_tangent;
 
-    int scount = 0;
+    std::unordered_map<VertexKey, std::vector<int>> vertex_map;
 
-    // Initialize tracknormal array to 0
-    std::fill(tracknormal + start_cnt, tracknormal + cnt, 0);
+    // Populate the map with vertices and their indices
+    for (int i = start_cnt; i < cnt; ++i) {
+        VertexKey key = {src_v[i].x, src_v[i].y, src_v[i].z};
+        vertex_map[key].push_back(i);
+    }
 
-    for (int i = start_cnt; i < cnt; i++) {
-        if (tracknormal[i] == 0) {
-            float x = src_v[i].x;
-            float y = src_v[i].y;
-            float z = src_v[i].z;
+    // Iterate through the map and process shared vertices
+    for (auto const& [key, indices] : vertex_map) {
+        if (indices.size() > 1) { // Shared vertices found
+            sum_normals = XMVectorZero();
+            sum_tangents = XMVectorZero();
 
-            scount = 0;
+            for (int index : indices) {
+                normal_temp = {src_v[index].nx, src_v[index].ny, src_v[index].nz};
+                sum_normals = XMVectorAdd(sum_normals, XMLoadFloat3(&normal_temp));
 
-            for (int j = i; j < cnt; j++) {
-                if (tracknormal[j] == 0 && x == src_v[j].x && y == src_v[j].y && z == src_v[j].z) {
-                    // found shared vertex
-                    sharedv[scount++] = j;
-                }
+                tangent_temp = {src_v[index].nmx, src_v[index].nmy, src_v[index].nmz};
+                sum_tangents = XMVectorAdd(sum_tangents, XMLoadFloat3(&tangent_temp));
             }
 
-            if (scount > 1) {
-                sum = XMVectorZero();
-                sumtan = XMVectorZero();
+            average_normal = XMVector3Normalize(sum_normals);
+            XMStoreFloat3(&final_normal, average_normal);
 
-                for (int k = 0; k < scount; k++) {
-                    x1 = { src_v[sharedv[k]].nx, src_v[sharedv[k]].ny, src_v[sharedv[k]].nz };
-                    sum = XMVectorAdd(sum, XMLoadFloat3(&x1));
+            average_tangent = XMVector3Normalize(sum_tangents);
+            XMStoreFloat3(&final_tangent, average_tangent);
 
-                    xtan = { src_v[sharedv[k]].nmx, src_v[sharedv[k]].nmy, src_v[sharedv[k]].nmz };
-                    sumtan = XMVectorAdd(sumtan, XMLoadFloat3(&xtan));
-                }
+            for (int index : indices) {
+                src_v[index].nx = final_normal.x;
+                src_v[index].ny = final_normal.y;
+                src_v[index].nz = final_normal.z;
 
-                average = XMVector3Normalize(sum);
-                XMStoreFloat3(&final2, average);
-
-                average = XMVector3Normalize(sumtan);
-                XMStoreFloat3(&finaltan, average);
-
-                for (int k = 0; k < scount; k++) {
-                    src_v[sharedv[k]].nx = final2.x;
-                    src_v[sharedv[k]].ny = final2.y;
-                    src_v[sharedv[k]].nz = final2.z;
-
-                    src_v[sharedv[k]].nmx = finaltan.x;
-                    src_v[sharedv[k]].nmy = finaltan.y;
-                    src_v[sharedv[k]].nmz = finaltan.z;
-
-                    tracknormal[sharedv[k]] = 1;
-                }
+                src_v[index].nmx = final_tangent.x;
+                src_v[index].nmy = final_tangent.y;
+                src_v[index].nmz = final_tangent.z;
             }
         }
     }
